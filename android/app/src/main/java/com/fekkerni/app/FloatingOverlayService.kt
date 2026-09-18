@@ -33,7 +33,7 @@ class FloatingOverlayService : Service() {
   private lateinit var windowManager: WindowManager
   private lateinit var handleView: OverlayView
   private lateinit var layoutParams: WindowManager.LayoutParams
-  private val overlayWidthPx by lazy { dp(72f) }
+  private val overlayWidthPx by lazy { dp(20f) }
   private val overlayHeightPx by lazy { dp(176f) }
 
   override fun onCreate() {
@@ -96,11 +96,11 @@ class FloatingOverlayService : Service() {
     private val edgeWindowSize = overlayWidthPx
     private val edgeWindowHeight = overlayHeightPx
     private val barLength = dp(140f).toFloat()
-    private val barThickness = dp(14f).toFloat()
+    private val barThickness = dp(12f).toFloat()
     private val ballDiameter = dp(46f).toFloat()
     private val ringSize = dp(38f).toFloat()
     private val minY = dp(90f).toFloat()
-    private val edgeInset = barThickness / 2f
+    private val edgeInset = barThickness / 2f - dp(2f)
     private var rightSide = prefs.getBoolean(KEY_RIGHT, true)
     private var centerX = if (rightSide) screenWidth - edgeInset else edgeInset
     private var centerY = prefs.getFloat(KEY_Y, screenHeight / 2f).coerceIn(minY, screenHeight - minY)
