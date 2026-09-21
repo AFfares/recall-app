@@ -21,6 +21,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -57,6 +59,11 @@ class FloatingOverlayService : Service() {
     super.onDestroy()
   }
 
+  override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+    super.onConfigurationChanged(newConfig)
+    if (::handleView.isInitialized) handleView.post { handleView.updateForCurrentDisplay() }
+  }
+
   override fun onBind(intent: Intent?): IBinder? = null
 
   private fun baseLayoutParams(): WindowManager.LayoutParams = WindowManager.LayoutParams(
@@ -91,8 +98,6 @@ class FloatingOverlayService : Service() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f }
     private val handler = Handler(Looper.getMainLooper())
-    private val screenWidth = resources.displayMetrics.widthPixels.toFloat()
-    private val screenHeight = resources.displayMetrics.heightPixels.toFloat()
     private val edgeWindowSize = overlayWidthPx
     private val edgeWindowHeight = overlayHeightPx
     private val barLength = dp(140f).toFloat()
@@ -102,8 +107,8 @@ class FloatingOverlayService : Service() {
     private val minY = dp(90f).toFloat()
     private val edgeInset = barThickness / 2f - dp(2f)
     private var rightSide = prefs.getBoolean(KEY_RIGHT, true)
-    private var centerX = if (rightSide) screenWidth - edgeInset else edgeInset
-    private var centerY = prefs.getFloat(KEY_Y, screenHeight / 2f).coerceIn(minY, screenHeight - minY)
+    private var centerX = if (rightSide) currentDisplayWidth() - edgeInset else edgeInset
+    private var centerY = prefs.getFloat(KEY_Y, currentDisplayHeight() / 2f).coerceIn(minY, currentDisplayHeight() - minY)
     private var downX = 0f
     private var downY = 0f
     private var dragging = false
@@ -124,6 +129,7 @@ class FloatingOverlayService : Service() {
     private var morphAnimator: ValueAnimator? = null
     private var trailAnimator: ValueAnimator? = null
     private var gazeAnimator: ValueAnimator? = null
+    private var fullscreen = false
 
     private val longPress = Runnable {
       if (!dragging) {
@@ -142,11 +148,46 @@ class FloatingOverlayService : Service() {
       }
     }
 
-    init { setLayerType(View.LAYER_TYPE_SOFTWARE, null) }
+    init {
+      setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+      ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+        val statusBarsVisible = insets.isVisible(WindowInsetsCompat.Type.statusBars())
+        val navigationBarsVisible = insets.isVisible(WindowInsetsCompat.Type.navigationBars())
+        val systemBarsVisible = statusBarsVisible || navigationBarsVisible
+        updateFullscreenState(!systemBarsVisible)
+        insets
+      }
+    }
+
+    private fun updateFullscreenState(isFullscreen: Boolean) {
+      if (fullscreen == isFullscreen) return
+      fullscreen = isFullscreen
+      val notTouchable = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+      alpha = if (fullscreen) 0f else 1f
+
+      this@FloatingOverlayService.layoutParams.flags = if (fullscreen) {
+        this@FloatingOverlayService.layoutParams.flags or notTouchable
+      } else {
+        this@FloatingOverlayService.layoutParams.flags and notTouchable.inv()
+      }
+      windowManager.updateViewLayout(this, this@FloatingOverlayService.layoutParams)
+    }
 
     fun prepareInitialLayout(params: WindowManager.LayoutParams) {
-      params.x = if (rightSide) screenWidth.toInt() - edgeWindowSize else 0
+      params.x = if (rightSide) currentDisplayWidth().roundToInt() - edgeWindowSize else 0
       params.y = (centerY - edgeWindowHeight / 2f).toInt()
+    }
+
+    fun updateForCurrentDisplay() {
+      val displayHeight = currentDisplayHeight()
+      centerX = if (rightSide) currentDisplayWidth() - edgeInset else edgeInset
+      centerY = centerY.coerceIn(minY, displayHeight - minY)
+      this@FloatingOverlayService.layoutParams.width = edgeWindowSize
+      this@FloatingOverlayService.layoutParams.height = edgeWindowHeight
+      this@FloatingOverlayService.layoutParams.x = if (rightSide) currentDisplayWidth().roundToInt() - edgeWindowSize else 0
+      this@FloatingOverlayService.layoutParams.y = (centerY - edgeWindowHeight / 2f).toInt()
+      windowManager.updateViewLayout(this, this@FloatingOverlayService.layoutParams)
+      invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -338,9 +379,11 @@ class FloatingOverlayService : Service() {
       stopWaves()
       animateTrailTo(0f)
       animateGazeTo(0f)
-      rightSide = centerX >= screenWidth / 2f
-      val targetX = if (rightSide) screenWidth - edgeInset else edgeInset
-      val targetY = centerY.coerceIn(minY, screenHeight - minY)
+      val displayWidth = currentDisplayWidth()
+      val displayHeight = currentDisplayHeight()
+      rightSide = centerX >= displayWidth / 2f
+      val targetX = if (rightSide) displayWidth - edgeInset else edgeInset
+      val targetY = centerY.coerceIn(minY, displayHeight - minY)
       val startX = centerX; val startY = centerY
       ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 360
@@ -377,7 +420,7 @@ class FloatingOverlayService : Service() {
     private fun collapseToEdge() {
       this@FloatingOverlayService.layoutParams.width = edgeWindowSize
       this@FloatingOverlayService.layoutParams.height = edgeWindowHeight
-      this@FloatingOverlayService.layoutParams.x = if (rightSide) screenWidth.toInt() - edgeWindowSize else 0
+      this@FloatingOverlayService.layoutParams.x = if (rightSide) currentDisplayWidth().roundToInt() - edgeWindowSize else 0
       this@FloatingOverlayService.layoutParams.y = (centerY - edgeWindowHeight / 2f).toInt()
       windowManager.updateViewLayout(this, this@FloatingOverlayService.layoutParams)
       expanded = false
@@ -432,11 +475,13 @@ class FloatingOverlayService : Service() {
     }
 
     private fun gazeTargetFor(positionX: Float): Float {
-      val distanceToLeft = positionX
-      val distanceToRight = screenWidth - positionX
-      val halfScreen = screenWidth / 2f
+      val halfScreen = currentDisplayWidth() / 2f
       return ((positionX - halfScreen) / halfScreen).coerceIn(-1f, 1f)
     }
+
+    private fun currentDisplayWidth(): Float = resources.displayMetrics.widthPixels.toFloat()
+
+    private fun currentDisplayHeight(): Float = resources.displayMetrics.heightPixels.toFloat()
   }
 
   private fun ValueAnimator.doOnEnd(action: () -> Unit) = addListener(object : android.animation.AnimatorListenerAdapter() {
