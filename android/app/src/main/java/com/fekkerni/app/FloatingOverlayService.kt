@@ -25,6 +25,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -130,6 +131,22 @@ class FloatingOverlayService : Service() {
     private var trailAnimator: ValueAnimator? = null
     private var gazeAnimator: ValueAnimator? = null
     private var fullscreen = false
+    private var sequenceAnimator: ValueAnimator? = null
+    private var sequenceStage = STAGE_NONE
+    private var sequenceProgress = 0f
+    private var recordingContentAlpha = 1f
+    private var ghostMerge = 0f
+    private var impactProgress = 0f
+    private var rippleProgress = 0f
+    private var particleProgress = 0f
+    private var disappearProgress = 0f
+    private var barReturnProgress = 1f
+    private var animationRunning = false
+    private var originX = centerX
+    private var originY = centerY
+    private var originRightSide = rightSide
+    private var recordingX = centerX
+    private var recordingY = centerY
 
     private val longPress = Runnable {
       if (!dragging) {
@@ -192,6 +209,10 @@ class FloatingOverlayService : Service() {
 
     override fun onDraw(canvas: Canvas) {
       super.onDraw(canvas)
+      if (animationRunning && sequenceStage != STAGE_BAR_RETURN) {
+        drawRecordingSequence(canvas)
+        return
+      }
       val x = if (expanded) centerX else if (rightSide) width - edgeInset else edgeInset
       val y = if (expanded) centerY else centerY - this@FloatingOverlayService.layoutParams.y
       val diameter = barThickness + (ballDiameter - barThickness) * morph
@@ -204,12 +225,127 @@ class FloatingOverlayService : Service() {
       }
       drawTrail(canvas, x, y)
       paint.color = HANDLE_COLOR
-      paint.alpha = if (morph > 0.5f) PUZZLE_ALPHA else HANDLE_ALPHA
+      paint.alpha = ((if (morph > 0.5f) PUZZLE_ALPHA else HANDLE_ALPHA) * barReturnProgress).toInt()
       paint.setShadowLayer(4f + morph * 4f, 0f, 1f, Color.argb(80, 59, 63, 143))
       drawHandle(canvas, x, y, diameter, length, radius)
       paint.clearShadowLayer()
       if (morph > 0.01f) drawEyes(canvas, x, y, diameter, length)
       if (morph > 0.01f) postInvalidateOnAnimation()
+    }
+
+    private fun drawRecordingSequence(canvas: Canvas) {
+      if (sequenceStage == STAGE_EMPTY) return
+      val fade = 1f - disappearProgress
+      val x = if (sequenceStage == STAGE_RECORDING) {
+        originX + (recordingX - originX) * sequenceProgress
+      } else centerX
+      val y = if (sequenceStage == STAGE_RECORDING) {
+        originY + (recordingY - originY) * sequenceProgress
+      } else centerY
+
+      if (sequenceStage == STAGE_RECORDING) {
+        drawRecordingWindow(canvas, x, y, 1f, recordingContentAlpha)
+        val bob = sin(System.currentTimeMillis() / 420.0).toFloat() * dp(2f)
+        drawGhost(canvas, x, y - dp(58f) + bob, 1f, 0f, 1f, dp(4f).toFloat())
+        postInvalidateOnAnimation()
+        return
+      }
+
+      val morphFade = if (sequenceStage == STAGE_MORPH) morph else 1f
+      val bodyProgress = smoothStep(morphFade)
+      drawRecordingWindow(canvas, recordingX, recordingY, (1f - bodyProgress) * (1f - bodyProgress), 0f, morphFade)
+      paint.color = HANDLE_COLOR
+      paint.alpha = (PUZZLE_ALPHA * bodyProgress * fade).toInt().coerceIn(0, 255)
+      paint.setShadowLayer(4f + morphFade * 4f, 0f, 1f, Color.argb(80, 59, 63, 143))
+      val mergeSquash = if (sequenceStage == STAGE_MORPH) sin(morphFade * Math.PI).toFloat() * 0.035f else 0f
+      val impactScale = if (sequenceStage == STAGE_IMPACT) 1f - sin(impactProgress * Math.PI).toFloat() * 0.18f else 1f
+      canvas.save()
+      canvas.scale(impactScale * (1f + mergeSquash), 1f + (1f - impactScale) * 0.35f - mergeSquash, x, y)
+      drawHandle(canvas, x, y, ballDiameter, ballDiameter, ballDiameter / 2f)
+      canvas.restore()
+      paint.clearShadowLayer()
+      if (morphFade > 0.01f && waveAnimator != null) {
+        drawRing(canvas, x, y, wave, 0f)
+        drawRing(canvas, x, y, wave, 0.5f)
+      }
+
+      val ghostTravel = smoothStep((ghostMerge - 0.08f).coerceIn(0f, 1f))
+      val ghostX = recordingX + sin(ghostTravel * Math.PI).toFloat() * if (originRightSide) -dp(8f) else dp(8f)
+      val ghostY = recordingY - dp(58f) + (y - (recordingY - dp(58f))) * ghostTravel
+      val ghostFade = if (ghostTravel < 0.82f) 1f else (1f - (ghostTravel - 0.82f) / 0.18f).coerceIn(0f, 1f)
+      val ghostScale = 1f - ghostTravel * 0.14f
+      if (sequenceStage == STAGE_MORPH) drawGhost(canvas, ghostX, ghostY, ghostFade * fade, 0f, ghostScale, 0f)
+      if (sequenceStage != STAGE_MORPH) {
+        paint.alpha = (PUZZLE_ALPHA * bodyProgress * fade).toInt().coerceIn(0, 255)
+        drawEyes(canvas, x, y, ballDiameter, ballDiameter)
+      }
+
+      if (sequenceStage == STAGE_IMPACT) {
+        drawImpactRings(canvas, x, y, rippleProgress)
+        drawParticles(canvas, x, y, particleProgress)
+      }
+      postInvalidateOnAnimation()
+    }
+
+    private fun drawRecordingWindow(canvas: Canvas, x: Float, y: Float, alpha: Float, contentAlpha: Float, morphProgress: Float = 0f) {
+      val windowWidth = dp(94f).toFloat() + (ballDiameter - dp(94f)) * morphProgress
+      val windowHeight = dp(58f).toFloat() + (ballDiameter - dp(58f)) * morphProgress
+      val cornerRadius = dp(16f).toFloat() + (dp(10f) - dp(16f)) * morphProgress
+      paint.style = Paint.Style.FILL
+      paint.color = Color.argb((220f * alpha).toInt().coerceIn(0, 255), 238, 245, 255)
+      canvas.drawRoundRect(x - windowWidth / 2f, y - windowHeight / 2f, x + windowWidth / 2f, y + windowHeight / 2f, cornerRadius, cornerRadius, paint)
+      paint.color = Color.argb((230f * contentAlpha).toInt().coerceIn(0, 255), 231, 76, 91)
+      canvas.drawCircle(x - windowWidth / 2f + dp(16f), y - dp(14f), dp(4f).toFloat(), paint)
+      paint.color = Color.argb((170f * contentAlpha).toInt().coerceIn(0, 255), 83, 105, 145)
+      for (index in 0..5) {
+        val waveHeight = dp(5f).toFloat() + (abs(sin(System.currentTimeMillis() / 150.0 + index)) * dp(8f)).toFloat()
+        val waveX = x - dp(25f) + index * dp(10f)
+        canvas.drawRoundRect(waveX, y - waveHeight / 2f, waveX + dp(3f), y + waveHeight / 2f, dp(2f).toFloat(), dp(2f).toFloat(), paint)
+      }
+    }
+
+    private fun drawGhost(canvas: Canvas, x: Float, y: Float, alpha: Float, gaze: Float, scale: Float = 1f, eyeOffsetY: Float = 0f) {
+      val ghostWidth = dp(38f).toFloat() * scale
+      val ghostHeight = dp(28f).toFloat() * scale
+      val left = x - ghostWidth / 2f
+      val top = y - ghostHeight / 2f
+      val right = x + ghostWidth / 2f
+      val bottom = y + ghostHeight / 2f
+      val ghostPath = Path()
+      ghostPath.moveTo(x - ghostWidth * 0.27f, top + ghostHeight * 0.025f)
+      ghostPath.cubicTo(x - ghostWidth * 0.32f, top + ghostHeight * 0.32f, left, top + ghostHeight * 0.48f, left, y + ghostHeight * 0.16f)
+      ghostPath.cubicTo(left, bottom - ghostHeight * 0.04f, x - ghostWidth * 0.3f, bottom, x, bottom)
+      ghostPath.cubicTo(x + ghostWidth * 0.3f, bottom, right, bottom - ghostHeight * 0.04f, right, y + ghostHeight * 0.16f)
+      ghostPath.cubicTo(right, top + ghostHeight * 0.48f, x + ghostWidth * 0.32f, top + ghostHeight * 0.32f, x + ghostWidth * 0.27f, top + ghostHeight * 0.025f)
+      ghostPath.cubicTo(x + ghostWidth * 0.13f, top - ghostHeight * 0.09f, x - ghostWidth * 0.13f, top - ghostHeight * 0.09f, x - ghostWidth * 0.27f, top + ghostHeight * 0.025f)
+      ghostPath.close()
+      paint.color = Color.argb((150f * alpha).toInt().coerceIn(0, 255), 218, 229, 249)
+      canvas.drawPath(ghostPath, paint)
+      paint.color = Color.argb((230f * alpha).toInt().coerceIn(0, 255), 43, 47, 74)
+      val eyeWidth = dp(3f).toFloat() * scale
+      val eyeHeight = dp(9f).toFloat() * scale
+      val eyeBob = sin(System.currentTimeMillis() / 510.0 + 0.8).toFloat() * dp(1.2f) * scale
+      val eyeY = y + dp(1f).toFloat() * scale + eyeBob + eyeOffsetY
+      canvas.drawRoundRect(x - dp(7f) * scale + gaze - eyeWidth / 2f, eyeY - eyeHeight / 2f, x - dp(7f) * scale + gaze + eyeWidth / 2f, eyeY + eyeHeight / 2f, eyeWidth / 2f, eyeWidth / 2f, paint)
+      canvas.drawRoundRect(x + dp(7f) * scale + gaze - eyeWidth / 2f, eyeY - eyeHeight / 2f, x + dp(7f) * scale + gaze + eyeWidth / 2f, eyeY + eyeHeight / 2f, eyeWidth / 2f, eyeWidth / 2f, paint)
+    }
+
+    private fun drawParticles(canvas: Canvas, x: Float, y: Float, progress: Float) {
+      paint.color = Color.argb((225f * (1f - progress)).toInt().coerceIn(0, 255), 217, 231, 254)
+      for (index in 0..5) {
+        val angle = index * 1.03f + 0.4f
+        val distance = dp(50f) * progress * (0.7f + index * 0.09f)
+        val radius = dp(2.2f).toFloat() * (0.8f + (index % 3) * 0.22f)
+        canvas.drawCircle(x + cos(angle) * distance, y + sin(angle) * distance, radius, paint)
+      }
+    }
+
+    private fun drawImpactRings(canvas: Canvas, x: Float, y: Float, progress: Float) {
+      for (index in 0..2) {
+        val ringProgress = ((progress - index * 0.12f) / 0.88f).coerceIn(0f, 1f)
+        ringPaint.color = Color.argb((210f * (1f - ringProgress)).toInt(), 217, 231, 254)
+        canvas.drawCircle(x, y, ringSize * (0.72f + ringProgress * (2.05f + index * 0.32f)), ringPaint)
+      }
     }
 
     private fun drawHandle(canvas: Canvas, x: Float, y: Float, width: Float, height: Float, radius: Float) {
@@ -256,12 +392,13 @@ class FloatingOverlayService : Service() {
       val bodyRight = canvasLeft + 46f * scaleX
       val bodyTop = canvasTop + 10f * scaleY
       val bodyBottom = bodyTop + 46f * scaleY
+      val shapeProgress = puzzleProgress.coerceIn(0f, 1f)
       val corner = 10f * min(scaleX, scaleY)
       val bumpLeft = canvasLeft + 12f * scaleX
       val bumpRight = canvasLeft + 34f * scaleX
       val bumpCenter = canvasLeft + 23f * scaleX
-      val bumpTop = bodyTop - 11f * scaleY
-      val biteRadius = 9f * min(scaleX, scaleY)
+      val bumpTop = bodyTop - 11f * scaleY * shapeProgress
+      val biteRadius = 9f * min(scaleX, scaleY) * shapeProgress
       val biteCenterY = bodyTop + 26f * scaleY
 
       // One continuous outline: structured rounded body, one top bump, and one circular bite.
@@ -325,6 +462,10 @@ class FloatingOverlayService : Service() {
     override fun onTouchEvent(event: MotionEvent): Boolean {
       when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
+          if (sequenceStage == STAGE_RECORDING) {
+            if (isRecordingWindowTap(event.rawX, event.rawY)) stopRecording()
+            return true
+          }
           downX = event.rawX; downY = event.rawY; longPressTriggered = false
           trailAnimator?.cancel()
           handler.postDelayed(longPress, LONG_PRESS_MS)
@@ -332,6 +473,14 @@ class FloatingOverlayService : Service() {
         }
         MotionEvent.ACTION_MOVE -> {
           if (!longPressTriggered && hypot(event.rawX - downX, event.rawY - downY) > TOUCH_SLOP) handler.removeCallbacks(longPress)
+          if (!longPressTriggered && !dragging && !animationRunning) {
+            val deltaX = event.rawX - downX
+            val movingAway = if (rightSide) deltaX < -SWIPE_DISTANCE else deltaX > SWIPE_DISTANCE
+            if (movingAway && abs(deltaX) > abs(event.rawY - downY) * 0.75f) {
+              startRecordingSequence()
+              return true
+            }
+          }
           if (dragging) {
             val now = event.eventTime
             val elapsedMs = max(1L, now - lastMoveTime)
@@ -365,6 +514,7 @@ class FloatingOverlayService : Service() {
         }
         MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
           handler.removeCallbacks(longPress)
+          if (animationRunning) return true
           if (dragging) finishDrag() else {
             invalidate()
           }
@@ -372,6 +522,10 @@ class FloatingOverlayService : Service() {
         }
       }
       return true
+    }
+
+    private fun isRecordingWindowTap(x: Float, y: Float): Boolean {
+      return abs(x - recordingX) <= dp(58f) && abs(y - recordingY) <= dp(38f)
     }
 
     private fun finishDrag() {
@@ -406,6 +560,113 @@ class FloatingOverlayService : Service() {
       gazeAnimator?.cancel()
       gazeX = 0f
       animateMorph(0f) { collapseToEdge() }
+    }
+
+    private fun startRecordingSequence() {
+      handler.removeCallbacks(longPress)
+      animationRunning = true
+      originX = centerX
+      originY = centerY
+      originRightSide = rightSide
+      recordingX = currentDisplayWidth() / 2f
+      recordingY = currentDisplayHeight() / 2f
+      sequenceStage = STAGE_RECORDING
+      sequenceProgress = 0f
+      recordingContentAlpha = 1f
+      ghostMerge = 0f
+      impactProgress = 0f
+      rippleProgress = 0f
+      particleProgress = 0f
+      disappearProgress = 0f
+      barReturnProgress = 0f
+      expandToFullScreen()
+      animateSequence(0f, 1f, 520L, { sequenceProgress = it }) { }
+    }
+
+    private fun stopRecording() {
+      if (sequenceStage != STAGE_RECORDING) return
+      sequenceAnimator?.cancel()
+      animateSequence(1f, 0f, 240L, { recordingContentAlpha = it }) {
+        handler.postDelayed({ beginPuzzleMorph() }, RECORDING_BREATH_MS)
+      }
+    }
+
+    private fun beginPuzzleMorph() {
+      sequenceStage = STAGE_MORPH
+      centerX = recordingX
+      centerY = recordingY
+      startWaves()
+      animateSequence(0f, 1f, 520L, {
+        morph = it
+        ghostMerge = (it * 1.15f).coerceIn(0f, 1f)
+      }) {
+        sequenceStage = STAGE_CREATURE
+        morph = 1f
+        ghostMerge = 1f
+        handler.postDelayed({ beginCreatureFlight() }, CREATURE_HOLD_MS)
+      }
+    }
+
+    private fun beginCreatureFlight() {
+      sequenceStage = STAGE_FLIGHT
+      animateSequence(0f, 1f, 860L, { progress ->
+        val curve = sin(progress * Math.PI).toFloat()
+        centerX = recordingX + (originX - recordingX) * progress + curve * if (originRightSide) -dp(16f) else dp(16f)
+        centerY = recordingY + (originY - recordingY) * progress - curve * dp(20f)
+      }) {
+        centerX = originX
+        centerY = originY
+        beginImpact()
+      }
+    }
+
+    private fun beginImpact() {
+      sequenceStage = STAGE_IMPACT
+      impactProgress = 0f
+      rippleProgress = 0f
+      particleProgress = 0f
+      animateSequence(0f, 1f, 260L, {
+        impactProgress = it
+        rippleProgress = it
+        particleProgress = it
+      }) {
+        beginCreatureDisappear()
+      }
+    }
+
+    private fun beginCreatureDisappear() {
+      sequenceStage = STAGE_DISAPPEAR
+      animateSequence(0f, 1f, 260L, { disappearProgress = it }) {
+        stopWaves()
+        sequenceStage = STAGE_EMPTY
+        handler.postDelayed({ beginBarReturn() }, EMPTY_PAUSE_MS)
+      }
+    }
+
+    private fun beginBarReturn() {
+      sequenceStage = STAGE_BAR_RETURN
+      morph = 0f
+      collapseToEdge()
+      animateSequence(0f, 1f, 240L, { barReturnProgress = it }) {
+        animationRunning = false
+        sequenceStage = STAGE_NONE
+        morph = 0f
+        barReturnProgress = 1f
+      }
+    }
+
+    private fun animateSequence(from: Float, to: Float, duration: Long, update: (Float) -> Unit, end: () -> Unit) {
+      sequenceAnimator?.cancel()
+      sequenceAnimator = ValueAnimator.ofFloat(from, to).apply {
+        this.duration = duration
+        addUpdateListener { update(it.animatedValue as Float); invalidate() }
+        doOnEnd(end)
+        start()
+      }
+    }
+
+    private fun smoothStep(value: Float): Float {
+      return value * value * (3f - 2f * value)
     }
 
     private fun expandToFullScreen() {
@@ -496,6 +757,19 @@ class FloatingOverlayService : Service() {
     private const val NOTIFICATION_ID = 4917
     private const val LONG_PRESS_MS = 300L
     private const val TOUCH_SLOP = 12f
+    private const val SWIPE_DISTANCE = 18f
+    private const val RECORDING_BREATH_MS = 120L
+    private const val CREATURE_HOLD_MS = 680L
+    private const val EMPTY_PAUSE_MS = 220L
+    private const val STAGE_NONE = 0
+    private const val STAGE_RECORDING = 1
+    private const val STAGE_MORPH = 2
+    private const val STAGE_CREATURE = 3
+    private const val STAGE_FLIGHT = 4
+    private const val STAGE_IMPACT = 5
+    private const val STAGE_DISAPPEAR = 6
+    private const val STAGE_EMPTY = 7
+    private const val STAGE_BAR_RETURN = 8
     private const val HANDLE_COLOR = 0xFFD9E7FE.toInt()
     private const val ACTIVE_COLOR = 0xFFD9E7FE.toInt()
     private const val HANDLE_ALPHA = 148
